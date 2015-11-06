@@ -148,6 +148,10 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	c := newConn(netConn, true, u.ReadBufferSize, u.WriteBufferSize)
 	c.subprotocol = subprotocol
 
+	if strings.Contains(r.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		c.compression = true
+	}
+
 	p := c.writeBuf[:0]
 	p = append(p, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "...)
 	p = append(p, computeAcceptKey(challengeKey)...)
@@ -175,6 +179,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 			p = append(p, "\r\n"...)
 		}
 	}
+	p = append(p, "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"...)
 	p = append(p, "\r\n"...)
 
 	// Clear deadlines set by HTTP server.

@@ -6,8 +6,10 @@ package websocket
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
+	"github.com/allaud/lzma"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -21,6 +23,7 @@ const (
 	maxControlFramePayloadSize = 125
 	finalBit                   = 1 << 7
 	maskBit                    = 1 << 7
+	compressionBit             = 1 << 6
 	writeWait                  = time.Second
 
 	defaultReadBufferSize  = 4096
@@ -142,6 +145,7 @@ func newMaskKey() [4]byte {
 type Conn struct {
 	conn        net.Conn
 	isServer    bool
+	compression bool
 	subprotocol string
 
 	// Write fields
@@ -346,6 +350,10 @@ func (c *Conn) flushFrame(final bool, extra []byte) error {
 	if final {
 		b0 |= finalBit
 	}
+	if c.compression {
+		b0 |= compressionBit
+	}
+
 	b1 := byte(0)
 	if !c.isServer {
 		b1 |= maskBit
@@ -432,8 +440,10 @@ func (w messageWriter) write(final bool, p []byte) (int, error) {
 		return 0, err
 	}
 
-	if len(p) > 2*len(w.c.writeBuf) && w.c.isServer {
-		// Don't buffer large messages.
+	//if len(p) > 2*len(w.c.writeBuf) && w.c.isServer {
+	// Don't buffer large messages.
+	// Don't buffer messages at all!
+	if w.c.isServer {
 		err := w.c.flushFrame(final, p)
 		if err != nil {
 			return 0, err
@@ -516,6 +526,15 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 		return err
 	}
 	w := wr.(messageWriter)
+
+	if c.compression {
+		var compressed bytes.Buffer
+		lw := lzma.NewWriterLevel(&compressed, 1)
+		lw.Write(data)
+		lw.Close()
+		data = compressed.Bytes()
+	}
+
 	if _, err := w.write(true, data); err != nil {
 		return err
 	}
@@ -573,7 +592,7 @@ func (c *Conn) advanceFrame() (int, error) {
 
 	final := b[0]&finalBit != 0
 	frameType := int(b[0] & 0xf)
-	reserved := int((b[0] >> 4) & 0x7)
+	reserved := int((b[0] >> 4) & 0x7 & 0x40)
 	mask := b[1]&maskBit != 0
 	c.readRemaining = int64(b[1] & 0x7f)
 
@@ -770,7 +789,19 @@ func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
 		return messageType, nil, err
 	}
 	p, err = ioutil.ReadAll(r)
-	return messageType, p, err
+
+	if !c.compression {
+		return messageType, p, err
+	}
+
+	var decompressed bytes.Buffer
+	decompressedBuffer := bufio.NewWriter(&decompressed)
+	compressed := bytes.NewBuffer(p)
+	lr := lzma.NewReader(compressed)
+	io.Copy(decompressedBuffer, lr)
+	lr.Close()
+	decBytes := decompressed.Bytes()
+	return messageType, decBytes, err
 }
 
 // SetReadDeadline sets the read deadline on the underlying network connection.
